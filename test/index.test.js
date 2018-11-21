@@ -12,6 +12,7 @@ const Producer = require('../').Producer;
 const sleep = require('mz-modules/sleep');
 const rimraf = require('mz-modules/rimraf');
 const config = require('../example/config');
+const MixAll = require('../lib/mix_all');
 
 const TOPIC = 'GXCSOCCER';
 
@@ -159,6 +160,8 @@ describe('test/index.test.js', () => {
       assert(consumer.processQueueTable.size === size);
 
       await consumer.updateProcessQueueTableInRebalance(TOPIC, []);
+      assert(consumer.processQueueTable.size === 2);
+      await consumer.updateProcessQueueTableInRebalance(MixAll.getRetryTopic(consumer.consumerGroup), []);
       assert(consumer.processQueueTable.size === 0);
     });
 
@@ -356,7 +359,7 @@ describe('test/index.test.js', () => {
   describe('process exception', () => {
     let consumer;
     let producer;
-    before(async () => {
+    beforeEach(async () => {
       consumer = new Consumer(Object.assign({
         httpclient,
         rebalanceInterval: 2000,
@@ -368,15 +371,71 @@ describe('test/index.test.js', () => {
       await producer.ready();
     });
 
-    after(async () => {
+    afterEach(async () => {
       await producer.close();
       await consumer.close();
     });
 
-    it('should retry if process failed', async () => {
+    it('should retry(consume later) if process failed', async () => {
       let msgId;
       consumer.subscribe(TOPIC, '*', async msg => {
-        console.log('message receive ------------> ', msg.body.toString());
+        console.warn('message receive ------------> ', msg.body.toString());
+        if (msg.msgId === msgId || msg.originMessageId === msgId) {
+          assert(msg.body.toString() === 'Hello MetaQ !!! ');
+          if (msg.reconsumeTimes === 0) {
+            throw new Error('mock error');
+          }
+          consumer.emit('*');
+        }
+      });
+
+      await sleep(5000);
+
+      const msg = new Message(TOPIC, // topic
+        'TagA', // tag
+        'Hello MetaQ !!! ' // body
+      );
+      const sendResult = await producer.send(msg);
+      assert(sendResult && sendResult.msgId);
+      msgId = sendResult.msgId;
+      await consumer.await('*');
+    });
+
+    it('should retry(retry message) if process failed', async () => {
+      let msgId;
+      mm(consumer._mqClient, 'consumerSendMessageBack', async () => {
+        throw new Error('mock error');
+      });
+      consumer.subscribe(TOPIC, '*', async msg => {
+        console.warn('message receive ------------> ', msg.body.toString());
+        if (msg.msgId === msgId || msg.originMessageId === msgId) {
+          assert(msg.body.toString() === 'Hello MetaQ !!! ');
+          if (msg.reconsumeTimes === 0) {
+            throw new Error('mock error');
+          }
+          consumer.emit('*');
+        }
+      });
+
+      await sleep(5000);
+
+      const msg = new Message(TOPIC, // topic
+        'TagA', // tag
+        'Hello MetaQ !!! ' // body
+      );
+      const sendResult = await producer.send(msg);
+      assert(sendResult && sendResult.msgId);
+      msgId = sendResult.msgId;
+      await consumer.await('*');
+    });
+
+    it('should retry(fall to local) if process failed', async () => {
+      let msgId;
+      mm(consumer, 'sendMessageBack', async () => {
+        throw new Error('mock error');
+      });
+      consumer.subscribe(TOPIC, '*', async msg => {
+        console.warn('message receive ------------> ', msg.body.toString());
         if (msg.msgId === msgId) {
           assert(msg.body.toString() === 'Hello MetaQ !!! ');
           if (msg.reconsumeTimes === 0) {
